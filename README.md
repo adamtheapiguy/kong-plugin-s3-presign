@@ -78,10 +78,57 @@ presigned URL and this body:
 | `max_bytes` | `5000000` | only enforced in `post` mode |
 | `max_keys` | `1000` | per listing page |
 | `ssl_verify` | `true` | for the plugin's own call to the store |
+| `cors_enabled` | `false` | see below |
+| `cors_origins` | `["*"]` | exact origins, or a single `*` |
+| `cors_methods` | `["GET","POST","OPTIONS"]` | advertised on preflight |
+| `cors_headers` | `["Authorization","Content-Type"]` | request headers a browser may send |
+| `cors_expose_headers` | `["Location","Cache-Control","Content-Disposition"]` | response headers JS may read |
+| `cors_max_age` | `3600` | preflight cache, seconds |
 
 The three header settings must name headers **Kong** sets, not ones a client
 can supply — strip inbound copies with `request-transformer`, or the
 provenance metadata is attacker-controlled.
+
+## CORS
+
+CORS is handled by this plugin rather than by the stock `cors` plugin, because
+`s3-presign` exits in the access phase — a short-circuited response is not
+guaranteed to reach another plugin's `header_filter`, so headers added there
+may never land.
+
+    - name: s3-presign
+      config:
+        cors_enabled: true
+        cors_origins:
+          - http://localhost:8080
+
+**Every route must list `OPTIONS`** in `methods`. Preflights are not GET or
+POST, so without it the browser's `OPTIONS` matches no route and gets a 404
+before the plugin ever runs:
+
+    methods: [ GET, OPTIONS ]
+
+Preflight is answered before any authentication check, since browsers never
+send credentials on a preflight — a 401 there breaks every browser client.
+
+`Location` is exposed by default so JavaScript can read the 307 target.
+
+Two things CORS on the gateway does **not** cover:
+
+- **The IdP token endpoint.** It sends no CORS headers, so a browser cannot
+  call it directly. Proxy it through Kong with the stock `cors` plugin.
+- **The object store.** Uploads post straight to the bucket, and `fetch`
+  follows the 307 straight to it as well. Both need S3 bucket CORS
+  configuration, which is separate from anything Kong does.
+
+Verify a preflight is answered:
+
+    curl -k -i -X OPTIONS https://<gateway>/files \
+      -H 'Origin: http://localhost:8080' \
+      -H 'Access-Control-Request-Method: GET' \
+      -H 'Access-Control-Request-Headers: authorization'
+
+Expect `204` with `Access-Control-Allow-Origin` and `-Allow-Headers`.
 
 ## Install
 

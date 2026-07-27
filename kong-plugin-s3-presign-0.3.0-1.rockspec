@@ -1,9 +1,9 @@
 package = "kong-plugin-s3-presign"
-version = "0.2.1-1"
+version = "0.3.0-1"
 
 source = {
   url = "git+https://github.com/adamtheapiguy/kong-plugin-s3-presign.git",
-  tag = "v0.2.1",
+  tag = "v0.3.0",
 }
 
 description = {

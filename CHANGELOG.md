@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- CORS support, handled in-plugin rather than via the stock `cors` plugin:
+  this plugin exits in the access phase, so a short-circuited response is not
+  guaranteed to reach another plugin's `header_filter`.
+  - `OPTIONS` preflight answered before any auth check, since browsers never
+    send credentials on a preflight.
+  - New config: `cors_enabled`, `cors_origins`, `cors_methods`,
+    `cors_headers`, `cors_expose_headers`, `cors_max_age`.
+  - `Location` is exposed by default so a browser can read the 307 target.
+- **Routes must list `OPTIONS`** in `methods`, or preflights never reach the
+  plugin and the browser sees a 404.
+
 ## 0.2.1
 
 - Removed the `do-not-touch-adam-poc` tag from the example and deployment

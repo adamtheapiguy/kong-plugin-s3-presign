@@ -59,6 +59,36 @@ return {
 
           { timeout    = { type = "integer", default = 10000 } },
           { ssl_verify = { type = "boolean", default = true } },
+
+          -- CORS. Handled in-plugin because this plugin exits in the access
+          -- phase, so another plugin's header_filter may never run. Preflight
+          -- also requires OPTIONS in the route's methods list.
+          { cors_enabled = { type = "boolean", default = false } },
+          { cors_origins = {
+              type = "array",
+              elements = { type = "string" },
+              default = { "*" },
+              description = "Exact origins, or a single \"*\". No wildcards "
+                         .. "within an origin.",
+          } },
+          { cors_methods = {
+              type = "array",
+              elements = { type = "string" },
+              default = { "GET", "POST", "OPTIONS" },
+          } },
+          { cors_headers = {
+              type = "array",
+              elements = { type = "string" },
+              default = { "Authorization", "Content-Type" },
+          } },
+          { cors_expose_headers = {
+              type = "array",
+              elements = { type = "string" },
+              -- Location must be exposed or a browser cannot read the 307
+              -- target; Content-Disposition for filename hints.
+              default = { "Location", "Cache-Control", "Content-Disposition" },
+          } },
+          { cors_max_age = { type = "integer", default = 3600 } },
         },
       },
     },

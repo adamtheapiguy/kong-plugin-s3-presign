@@ -10,11 +10,76 @@ local S3Presign = {
   -- request-transformer (801), so authentication, authorization and header
   -- scrubbing all run first.
   PRIORITY = 750,
-  VERSION  = "0.2.1",
+  VERSION  = "0.3.0",
 }
 
 local SAFE_NAME = "^[A-Za-z0-9._%-]+$"
 local NO_STORE  = "no-store, no-cache, must-revalidate"
+
+
+-- ---------------------------------------------------------------------------
+-- CORS
+--
+-- Handled here rather than by the stock cors plugin because this plugin exits
+-- in the access phase: a short-circuited response may never reach a
+-- header_filter, so headers added by another plugin are not guaranteed to
+-- land. Preflights also need the route to accept OPTIONS - add it to the
+-- route's methods list or the request never reaches this plugin at all.
+-- ---------------------------------------------------------------------------
+
+local function cors_headers(conf)
+  if not conf.cors_enabled then
+    return {}
+  end
+
+  local origin = kong.request.get_header("Origin")
+  local allow
+
+  for _, candidate in ipairs(conf.cors_origins or {}) do
+    if candidate == "*" then
+      allow = "*"
+      break
+    elseif origin and candidate == origin then
+      allow = origin
+      break
+    end
+  end
+
+  if not allow then
+    return {}
+  end
+
+  return {
+    ["Access-Control-Allow-Origin"]   = allow,
+    ["Access-Control-Expose-Headers"] = table.concat(conf.cors_expose_headers, ", "),
+    ["Vary"]                          = "Origin",
+  }
+end
+
+
+-- Merge CORS headers into a response header table.
+local function with_cors(conf, headers)
+  local out = headers or {}
+  for name, value in pairs(cors_headers(conf)) do
+    out[name] = value
+  end
+  return out
+end
+
+
+local function preflight(conf)
+  local headers = cors_headers(conf)
+
+  if not headers["Access-Control-Allow-Origin"] then
+    return kong.response.exit(403, { error = "origin not allowed" })
+  end
+
+  headers["Access-Control-Allow-Methods"] = table.concat(conf.cors_methods, ", ")
+  headers["Access-Control-Allow-Headers"] = table.concat(conf.cors_headers, ", ")
+  headers["Access-Control-Max-Age"]       = tostring(conf.cors_max_age)
+
+  return kong.response.exit(204, nil, headers)
+end
 
 
 local function s3_config(conf)
@@ -71,7 +136,7 @@ local function op_upload(conf, cfg)
      or not filename:match(SAFE_NAME) then
     return kong.response.exit(400, {
       error = "filename must match [A-Za-z0-9._-] and be 1-128 characters",
-    })
+    }, with_cors(conf))
   end
 
   local key = conf.base_prefix .. filename
@@ -95,7 +160,7 @@ local function op_upload(conf, cfg)
         url             = sigv4.presign(cfg, "PUT", key, conf.upload_ttl, headers),
         requiredHeaders = headers,
       },
-    }, { ["Cache-Control"] = NO_STORE })
+    }, with_cors(conf, { ["Cache-Control"] = NO_STORE }))
   end
 
   -- POST mode: the policy document travels with the upload, so S3 enforces
@@ -108,7 +173,7 @@ local function op_upload(conf, cfg)
     expiresIn = conf.upload_ttl,
     maxBytes  = conf.max_bytes,
     upload    = post,
-  }, { ["Cache-Control"] = NO_STORE })
+  }, with_cors(conf, { ["Cache-Control"] = NO_STORE }))
 end
 
 
@@ -122,7 +187,7 @@ end
 -- ---------------------------------------------------------------------------
 local function op_download(conf, cfg, rest)
   if rest:find("%.%.") then
-    return kong.response.exit(400, { error = "invalid path" })
+    return kong.response.exit(400, { error = "invalid path" }, with_cors(conf))
   end
 
   local key = conf.base_prefix .. rest
@@ -131,10 +196,10 @@ local function op_download(conf, cfg, rest)
   return kong.response.exit(307, {
     key      = key,
     download = { url = url, expiresIn = conf.download_ttl },
-  }, {
+  }, with_cors(conf, {
     ["Location"]      = url,
     ["Cache-Control"] = NO_STORE,
-  })
+  }))
 end
 
 
@@ -181,14 +246,15 @@ local function op_list(conf, cfg)
 
   if not res then
     kong.log.err("s3 list failed: ", err)
-    return kong.response.exit(502, { error = "object store unreachable" })
+    return kong.response.exit(502, { error = "object store unreachable" },
+                              with_cors(conf))
   end
 
   if res.status ~= 200 then
     kong.log.err("s3 list returned ", res.status, ": ", res.body)
     return kong.response.exit(502, {
       error = "object store error", status = res.status,
-    })
+    }, with_cors(conf))
   end
 
   -- ListBucketResult is flat enough that pattern matching beats pulling in an
@@ -232,7 +298,7 @@ local function op_list(conf, cfg)
       unescape(res.body:match("<NextContinuationToken>(.-)</NextContinuationToken>"))
   end
 
-  return kong.response.exit(200, out, { ["Cache-Control"] = NO_STORE })
+  return kong.response.exit(200, out, with_cors(conf, { ["Cache-Control"] = NO_STORE }))
 end
 
 
@@ -247,6 +313,12 @@ function S3Presign:access(conf)
   local escaped = conf.base_path:gsub("([%-%.%+%[%]%(%)%$%^%%%?%*])", "%%%1")
   local rest = path:match("^" .. escaped .. "/(.+)$")
 
+  -- Preflight is answered before authentication would matter: browsers never
+  -- send credentials on an OPTIONS, so a 401 here breaks every browser client.
+  if method == "OPTIONS" and conf.cors_enabled then
+    return preflight(conf)
+  end
+
   if method == "POST" and not rest then
     return op_upload(conf, cfg)
   elseif method == "GET" and rest then
@@ -255,7 +327,7 @@ function S3Presign:access(conf)
     return op_list(conf, cfg)
   end
 
-  return kong.response.exit(405, { error = "method not allowed" })
+  return kong.response.exit(405, { error = "method not allowed" }, with_cors(conf))
 end
 
 

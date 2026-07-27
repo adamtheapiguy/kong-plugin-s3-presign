@@ -31,21 +31,21 @@ services:
       # and the object routes, and two of these mint credentials.
       - name: files-upload
         paths: [ "~/files$" ]
-        methods: [ POST ]
+        methods: [ POST, OPTIONS ]
         strip_path: false
         protocols: [ https ]
         tags: [ s3-presign, "op:upload" ]
 
       - name: files-list
         paths: [ "~/files$" ]
-        methods: [ GET ]
+        methods: [ GET, OPTIONS ]
         strip_path: false
         protocols: [ https ]
         tags: [ s3-presign, "op:list" ]
 
       - name: files-download
         paths: [ "~/files/(?<objpath>.+)$" ]
-        methods: [ GET ]
+        methods: [ GET, OPTIONS ]
         strip_path: false
         protocols: [ https ]
         tags: [ s3-presign, "op:download" ]
@@ -109,6 +109,17 @@ services:
           download_ttl: 900
           max_bytes: 5000000
           max_keys: 1000
+
+          # CORS for the Swagger UI explorer. Preflight is answered by the
+          # plugin before auth runs, so OPTIONS is added to every route above.
+          cors_enabled: true
+          cors_origins:
+            - http://localhost:8080
+            - http://127.0.0.1:8080
+          cors_methods: [ GET, POST, OPTIONS ]
+          cors_headers: [ Authorization, Content-Type ]
+          cors_expose_headers: [ Location, Cache-Control, Content-Disposition ]
+          cors_max_age: 3600
           ssl_verify: true
 
       # -- 5. Response transformer -------------------------------------------
