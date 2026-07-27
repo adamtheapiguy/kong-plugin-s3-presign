@@ -1,0 +1,50 @@
+_format_version: "3.0"
+
+# ---------------------------------------------------------------------------
+# Example decK config for the s3-presign plugin. All hostnames below are
+# placeholders - substitute your own.
+# ---------------------------------------------------------------------------
+
+services:
+  - name: files
+    url: http://127.0.0.1:1        # never reached; plugin exits in access
+    retries: 0
+    tags: [ s3-presign ]
+
+    routes:
+      - name: files-upload
+        paths: [ "~/files$" ]
+        methods: [ POST ]
+        strip_path: false
+        protocols: [ https ]
+        tags: [ s3-presign, "op:upload" ]
+
+      - name: files-list
+        paths: [ "~/files$" ]
+        methods: [ GET ]
+        strip_path: false
+        protocols: [ https ]
+        tags: [ s3-presign, "op:list" ]
+
+      - name: files-download
+        paths: [ "~/files/(?<objpath>.+)$" ]
+        methods: [ GET ]
+        strip_path: false
+        protocols: [ https ]
+        tags: [ s3-presign, "op:download" ]
+
+    plugins:
+      - name: s3-presign
+        config:
+          s3_endpoint: https://s3.example.internal
+          bucket: example-bucket
+          region: us-east-1
+          base_path: /files
+          base_prefix: "files/"
+          access_key: "{vault://env/s3-access-key}"
+          secret_key: "{vault://env/s3-secret-key}"
+          upload_mode: post
+          upload_ttl: 300
+          download_ttl: 900
+          max_bytes: 5000000
+          ssl_verify: true

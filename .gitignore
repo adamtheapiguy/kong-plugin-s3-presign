@@ -1,0 +1,5 @@
+*.rock
+*.src.rock
+rocks/*.tmp
+.DS_Store
+files-service.yaml
