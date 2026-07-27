@@ -9,7 +9,7 @@ return {
         fields = {
           { s3_endpoint = typedefs.url { required = true } },
           { bucket      = { type = "string", required = true } },
-          { region      = { type = "string", default = "us-east-1" } },
+          { region      = { type = "string", default = "ap-southeast-2" } },
 
           -- base_path must match the route prefix; base_prefix is the folder
           -- inside the bucket. They are separate so the API surface and the

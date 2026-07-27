@@ -24,7 +24,7 @@ The plugin terminates in the access phase; no upstream is contacted.
 |---|---|---|
 | `s3_endpoint` | - | scheme + host, no path |
 | `bucket` | - | |
-| `region` | `us-east-1` | any value works, must match what the array expects |
+| `region` | `ap-southeast-2` | any value works, must match what the array expects |
 | `base_path` | `/files` | must match the route prefix |
 | `base_prefix` | `files/` | folder inside the bucket |
 | `access_key` / `secret_key` | - | vault-referenceable |
