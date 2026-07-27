@@ -10,7 +10,7 @@ local S3Presign = {
   -- request-transformer (801), so authentication, authorization and header
   -- scrubbing all run first.
   PRIORITY = 750,
-  VERSION  = "0.2.0",
+  VERSION  = "0.2.1",
 }
 
 local SAFE_NAME = "^[A-Za-z0-9._%-]+$"

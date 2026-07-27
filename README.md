@@ -107,7 +107,7 @@ needs it too since it validates plugin config against the schema:
 Copy `files-service.example.yaml` to `files-service.yaml`, fill in your
 endpoints, then:
 
-    deck gateway diff  files-service.yaml --select-tag do-not-touch-adam-poc
+    deck gateway diff  files-service.yaml --select-tag s3-presign
     deck gateway apply files-service.yaml
 
 `apply` rather than `sync` — sync reconciles the whole config against one

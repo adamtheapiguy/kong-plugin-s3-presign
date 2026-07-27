@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Removed the `do-not-touch-adam-poc` tag from the example and deployment
+  configs; `s3-presign` is now the only tag, and the `--select-tag` examples
+  in the README and config comments match it.
+- No functional change to the plugin.
+
 ## 0.2.0
 
 - List response now mirrors the S3 ListObjectsV2 shape field for field
