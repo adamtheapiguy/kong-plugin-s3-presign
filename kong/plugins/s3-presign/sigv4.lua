@@ -132,6 +132,7 @@ end
 
 -- ---------------------------------------------------------------------------
 -- POST policy. The conditions travel with the upload and are enforced by S3.
+-- Confirmed working against FlashBlade, including content-length-range.
 -- ---------------------------------------------------------------------------
 function _M.presign_post(cfg, key, content_type, meta, max_bytes, ttl)
   local amzdate, datestamp, now = stamps()
@@ -156,7 +157,7 @@ function _M.presign_post(cfg, key, content_type, meta, max_bytes, ttl)
     ["x-amz-date"]       = amzdate,
   }
 
-  -- Object tagging is NotImplemented on this array, so provenance goes in
+  -- Object tagging is NotImplemented on FlashBlade, so provenance goes in
   -- x-amz-meta-* instead. Each value is asserted in the policy, so a client
   -- cannot alter one without invalidating the signature.
   for name, value in pairs(meta or {}) do

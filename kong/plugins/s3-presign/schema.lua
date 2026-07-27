@@ -7,13 +7,20 @@ return {
     { config = {
         type = "record",
         fields = {
-          { s3_endpoint = typedefs.url { required = true } },
-          { bucket      = { type = "string", required = true } },
-          { region      = { type = "string", default = "ap-southeast-2" } },
+          -- HTTPS only: the plugin's own call to the object store carries the
+          -- Authorization header, and presigned URLs are bearer credentials.
+          { s3_endpoint = typedefs.url {
+              required = true,
+              match = "^https://",
+              err = "s3_endpoint must be an https:// URL",
+          } },
+
+          { bucket = { type = "string", required = true } },
+          { region = { type = "string", default = "ap-southeast-2" } },
 
           -- base_path must match the route prefix; base_prefix is the folder
-          -- inside the bucket. They are separate so the API surface and the
-          -- object layout can diverge later without a code change.
+          -- inside the bucket. Separate so the API surface and the object
+          -- layout can diverge later without a code change.
           { base_path   = { type = "string", default = "/files" } },
           { base_prefix = { type = "string", default = "files/" } },
 
@@ -25,20 +32,33 @@ return {
           { secret_key = { type = "string", required = true,
               referenceable = true, encrypted = true } },
 
+          -- Headers the upstream auth plugins set. Values from these are
+          -- stamped into object metadata, so they must be headers Kong
+          -- controls - strip any client-supplied copies with
+          -- request-transformer.
+          { client_id_header = { type = "string",
+              default = "X-Authenticated-Client-Id" } },
+          { client_ip_header = { type = "string",
+              default = "X-Real-Ip" } },
+          { cert_thumbprint_header = { type = "string",
+              default = "X-Client-Cert-Thumbprint" } },
+
           { upload_ttl   = { type = "integer", default = 300,
               between = { 30, 604800 } } },
           { download_ttl = { type = "integer", default = 900,
               between = { 30, 604800 } } },
           { max_bytes    = { type = "integer", default = 5000000, gt = 0 } },
+          { max_keys     = { type = "integer", default = 1000,
+              between = { 1, 1000 } } },
 
           -- "post": presigned POST policy, size cap enforced by S3.
-          -- "put":  presigned PUT, for arrays without POST-to-bucket support.
+          -- "put":  presigned PUT, for stores without POST-to-bucket support.
           --         No server-side size cap - use request-size-limiting.
-          { upload_mode  = { type = "string", default = "post",
+          { upload_mode = { type = "string", default = "post",
               one_of = { "post", "put" } } },
 
-          { timeout      = { type = "integer", default = 10000 } },
-          { ssl_verify   = { type = "boolean", default = true } },
+          { timeout    = { type = "integer", default = 10000 } },
+          { ssl_verify = { type = "boolean", default = true } },
         },
       },
     },

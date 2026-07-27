@@ -10,10 +10,11 @@ local S3Presign = {
   -- request-transformer (801), so authentication, authorization and header
   -- scrubbing all run first.
   PRIORITY = 750,
-  VERSION  = "0.1.0",
+  VERSION  = "0.2.0",
 }
 
 local SAFE_NAME = "^[A-Za-z0-9._%-]+$"
+local NO_STORE  = "no-store, no-cache, must-revalidate"
 
 
 local function s3_config(conf)
@@ -29,33 +30,30 @@ local function s3_config(conf)
 end
 
 
--- Identity comes from headers Kong itself set. The request-transformer strips
--- any client-supplied copies first, so these cannot be spoofed - provided the
--- data plane is only reachable through the load balancer.
-local function caller()
-  local h = kong.request.get_headers()
-  local function one(name, default)
-    local v = h[name]
-    if type(v) == "table" then v = v[1] end
-    return v or default
-  end
-  return {
-    sub     = one("x-authenticated-userid", "unknown"),
-    email   = one("x-authenticated-email", "unknown"),
-    company = one("x-authenticated-company", "unknown"),
-    ip      = one("x-real-ip") or kong.client.get_forwarded_ip() or "unknown",
-  }
+-- Single header value. Kong lowercases header names; repeated headers arrive
+-- as a table, in which case take the first.
+local function header(name, default)
+  local v = kong.request.get_header(name)
+  if type(v) == "table" then v = v[1] end
+  if v == nil or v == "" then return default end
+  return v
 end
 
 
-local function provenance()
-  local who = caller()
+-- Provenance stamped onto every upload. Values come only from headers Kong
+-- itself set - request-transformer strips any client-supplied copies first -
+-- and each one is asserted in the POST policy, so a client cannot alter a
+-- value without invalidating the signature.
+local function provenance(conf)
   return {
-    ["x-amz-meta-objectowneremail"]       = who.email,
-    ["x-amz-meta-developerfirstcompany"]  = who.company,
-    ["x-amz-meta-clientipattimeofupload"] = who.ip,
-    ["x-amz-meta-uploadedby"]             = who.sub,
-    ["x-amz-meta-uploadedat"]             = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    ["x-amz-meta-uploadedby"] =
+      header(conf.client_id_header, "unknown"),
+    ["x-amz-meta-clientipattimeofupload"] =
+      header(conf.client_ip_header, "unknown"),
+    ["x-amz-meta-client-cert-thumbprint"] =
+      header(conf.cert_thumbprint_header, "unknown"),
+    ["x-amz-meta-uploadedat"] =
+      os.date("!%Y-%m-%dT%H:%M:%SZ"),
   }
 end
 
@@ -77,29 +75,27 @@ local function op_upload(conf, cfg)
   end
 
   local key = conf.base_prefix .. filename
-  local meta = provenance()
+  local meta = provenance(conf)
 
-  -- PUT mode: fallback for arrays that do not implement POST-to-bucket form
-  -- uploads. The metadata headers are folded into the signature so they stay
-  -- tamper-proof, but S3 cannot enforce a size limit on a presigned PUT -
-  -- cap it with the request-size-limiting plugin on the route instead.
+  -- PUT mode: fallback for object stores without POST-to-bucket form uploads.
+  -- Metadata headers are folded into the signature so they stay tamper-proof,
+  -- but S3 cannot enforce a size limit on a presigned PUT - cap it with the
+  -- request-size-limiting plugin on the upload route instead.
   if conf.upload_mode == "put" then
     local headers = { ["content-type"] = content_type }
     for name, value in pairs(meta) do
       headers[name] = value
     end
 
-    local url = sigv4.presign(cfg, "PUT", key, conf.upload_ttl, headers)
-
     return kong.response.exit(200, {
       key       = key,
       expiresIn = conf.upload_ttl,
       upload    = {
         method          = "PUT",
-        url             = url,
+        url             = sigv4.presign(cfg, "PUT", key, conf.upload_ttl, headers),
         requiredHeaders = headers,
       },
-    })
+    }, { ["Cache-Control"] = NO_STORE })
   end
 
   -- POST mode: the policy document travels with the upload, so S3 enforces
@@ -112,12 +108,17 @@ local function op_upload(conf, cfg)
     expiresIn = conf.upload_ttl,
     maxBytes  = conf.max_bytes,
     upload    = post,
-  })
+  }, { ["Cache-Control"] = NO_STORE })
 end
 
 
 -- ---------------------------------------------------------------------------
 -- 2. download
+--
+-- 307 with Location set to the presigned URL, and the JSON body retained. A
+-- client that follows redirects gets the object in one round trip; a client
+-- that wants the URL reads the body and ignores the redirect. 307 (not 302)
+-- so the method is preserved on the way through.
 -- ---------------------------------------------------------------------------
 local function op_download(conf, cfg, rest)
   if rest:find("%.%.") then
@@ -127,28 +128,47 @@ local function op_download(conf, cfg, rest)
   local key = conf.base_prefix .. rest
   local url = sigv4.presign(cfg, "GET", key, conf.download_ttl)
 
-  return kong.response.exit(200, {
+  return kong.response.exit(307, {
     key      = key,
     download = { url = url, expiresIn = conf.download_ttl },
+  }, {
+    ["Location"]      = url,
+    ["Cache-Control"] = NO_STORE,
   })
 end
 
 
 -- ---------------------------------------------------------------------------
 -- 3. list
+--
+-- Mirrors the S3 ListObjectsV2 response, field for field, rendered as JSON.
+-- No delimiter is sent, so the listing is flat and there are no CommonPrefixes.
 -- ---------------------------------------------------------------------------
 local function op_list(conf, cfg)
   local args = kong.request.get_query()
+
   local extra = args.prefix
   if type(extra) ~= "string" or extra:find("%.%.") then
     extra = ""
   end
   local prefix = conf.base_prefix .. extra
 
-  -- Canonical query string must be in ascending key order.
-  local query = "delimiter=%2F&list-type=2&prefix=" .. sigv4.uri_encode(prefix)
-  local path  = "/" .. cfg.bucket
+  local token = type(args["continuation-token"]) == "string"
+                and args["continuation-token"] or nil
+  local max_keys = tonumber(args["max-keys"]) or conf.max_keys
 
+  -- Canonical query string must be sorted by parameter name; the order below
+  -- is already ascending.
+  local parts = {}
+  if token then
+    parts[#parts + 1] = "continuation-token=" .. sigv4.uri_encode(token)
+  end
+  parts[#parts + 1] = "list-type=2"
+  parts[#parts + 1] = "max-keys=" .. max_keys
+  parts[#parts + 1] = "prefix=" .. sigv4.uri_encode(prefix)
+  local query = table.concat(parts, "&")
+
+  local path    = "/" .. cfg.bucket
   local headers = sigv4.sign_headers(cfg, "GET", path, query)
 
   local httpc = http.new()
@@ -166,45 +186,53 @@ local function op_list(conf, cfg)
 
   if res.status ~= 200 then
     kong.log.err("s3 list returned ", res.status, ": ", res.body)
-    return kong.response.exit(502, { error = "object store error", status = res.status })
+    return kong.response.exit(502, {
+      error = "object store error", status = res.status,
+    })
   end
 
   -- ListBucketResult is flat enough that pattern matching beats pulling in an
   -- XML parser. Nested or namespaced responses would need a real one.
-  local objects, folders = {}, {}
+  local function unescape(s)
+    if not s then return nil end
+    return (s:gsub("&quot;", '"'):gsub("&lt;", "<"):gsub("&gt;", ">")
+             :gsub("&apos;", "'"):gsub("&amp;", "&"))
+  end
 
+  local contents = {}
   for block in res.body:gmatch("<Contents>(.-)</Contents>") do
-    local key = block:match("<Key>(.-)</Key>") or ""
+    local key = unescape(block:match("<Key>(.-)</Key>")) or ""
     if not key:match("/$") then          -- skip directory markers
-      objects[#objects + 1] = {
-        key          = key,
-        name         = key:sub(#conf.base_prefix + 1),
-        size         = tonumber(block:match("<Size>(.-)</Size>")) or 0,
-        lastModified = block:match("<LastModified>(.-)</LastModified>"),
-        etag         = (block:match("<ETag>(.-)</ETag>") or ""):gsub("&quot;", ""),
+      contents[#contents + 1] = {
+        Key          = key,
+        LastModified = block:match("<LastModified>(.-)</LastModified>"),
+        ETag         = unescape(block:match("<ETag>(.-)</ETag>")),
+        Size         = tonumber(block:match("<Size>(.-)</Size>")) or 0,
+        StorageClass = block:match("<StorageClass>(.-)</StorageClass>"),
       }
     end
   end
 
-  for block in res.body:gmatch("<CommonPrefixes>(.-)</CommonPrefixes>") do
-    local p = block:match("<Prefix>(.-)</Prefix>")
-    if p then
-      folders[#folders + 1] = p:sub(#conf.base_prefix + 1)
-    end
-  end
-
   local truncated = res.body:match("<IsTruncated>(.-)</IsTruncated>") == "true"
+
+  local out = {
+    Name        = cfg.bucket,
+    Prefix      = prefix,
+    MaxKeys     = max_keys,
+    KeyCount    = #contents,
+    IsTruncated = truncated,
+    Contents    = setmetatable(contents, cjson.array_mt),
+  }
+
+  if token then
+    out.ContinuationToken = token
+  end
   if truncated then
-    kong.log.warn("s3 listing truncated at 1000 keys for prefix ", prefix)
+    out.NextContinuationToken =
+      unescape(res.body:match("<NextContinuationToken>(.-)</NextContinuationToken>"))
   end
 
-  return kong.response.exit(200, {
-    prefix    = prefix,
-    count     = #objects,
-    truncated = truncated,
-    folders   = setmetatable(folders, cjson.array_mt),
-    objects   = setmetatable(objects, cjson.array_mt),
-  })
+  return kong.response.exit(200, out, { ["Cache-Control"] = NO_STORE })
 end
 
 

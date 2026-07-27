@@ -1,10 +1,9 @@
--- Replace adamtheapiguy before publishing.
 package = "kong-plugin-s3-presign"
-version = "0.1.0-1"
+version = "0.2.0-1"
 
 source = {
   url = "git+https://github.com/adamtheapiguy/kong-plugin-s3-presign.git",
-  tag = "v0.1.0",
+  tag = "v0.2.0",
 }
 
 description = {
@@ -12,7 +11,8 @@ description = {
   detailed = [[
     Kong plugin for S3-compatible object stores (developed against Pure
     Storage FlashBlade). Terminates in the access phase and returns presigned
-    upload forms, presigned download URLs, and JSON bucket listings.
+    upload forms, presigned download URLs as a 307 redirect, and bucket
+    listings mirroring the S3 ListObjectsV2 response as JSON.
   ]],
   homepage = "https://github.com/adamtheapiguy/kong-plugin-s3-presign",
   license  = "Apache-2.0",

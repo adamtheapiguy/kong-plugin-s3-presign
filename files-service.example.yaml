@@ -1,55 +1,133 @@
 _format_version: "3.0"
+_workspace: enterprise
 
 # ---------------------------------------------------------------------------
-# Example decK config for the s3-presign plugin. All hostnames below are
-# placeholders - substitute your own.
+# "files" service, backed by the s3-presign plugin.
+#
+#   POST /files          -> presigned upload form (POST policy)
+#   GET  /files          -> ListObjectsV2 response as JSON
+#   GET  /files/<path>   -> 307 to a presigned download URL, JSON body retained
+#
+# The s3-presign plugin terminates in the access phase, so the upstream is
+# never contacted - but a service still requires a url, hence the dead one.
+#
+#   deck gateway diff  files-service.yaml --workspace enterprise \
+#     --select-tag do-not-touch-adam-poc
+#   deck gateway apply files-service.yaml --workspace enterprise
+#
+# Placeholders throughout - substitute your own endpoints.
 # ---------------------------------------------------------------------------
 
 services:
   - name: files
     url: http://127.0.0.1:1        # never reached; plugin exits in access
     retries: 0
-    tags: [ s3-presign ]
+    connect_timeout: 1000
+    tags:
+      - s3-presign
+      - do-not-touch-adam-poc
 
     routes:
+      # Anchored regexes: a bare prefix path would match both the collection
+      # and the object routes, and two of these mint credentials.
       - name: files-upload
         paths: [ "~/files$" ]
         methods: [ POST ]
         strip_path: false
         protocols: [ https ]
-        tags: [ s3-presign, "op:upload" ]
+        tags: [ s3-presign, do-not-touch-adam-poc, "op:upload" ]
 
       - name: files-list
         paths: [ "~/files$" ]
         methods: [ GET ]
         strip_path: false
         protocols: [ https ]
-        tags: [ s3-presign, "op:list" ]
+        tags: [ s3-presign, do-not-touch-adam-poc, "op:list" ]
 
       - name: files-download
         paths: [ "~/files/(?<objpath>.+)$" ]
         methods: [ GET ]
         strip_path: false
         protocols: [ https ]
-        tags: [ s3-presign, "op:download" ]
+        tags: [ s3-presign, do-not-touch-adam-poc, "op:download" ]
 
     plugins:
-      # Front this with whatever authentication your gateway uses - e.g. the
-      # openid-connect plugin pointed at your OIDC IdP, plus a sideband
-      # authorization plugin. The identity headers those set upstream are what
-      # s3-presign stamps into object metadata:
-      #   X-Authenticated-Userid / -Email / -Company
-      - name: s3-presign
+
+      # -- 1. OIDC - token validation against the IdP -------------------------
+      # TODO: paste your working config from dispatch-oidc.yaml.
+      # It must forward the token's client_id upstream as the header named in
+      # the s3-presign client_id_header setting below - otherwise every object
+      # is stamped x-amz-meta-uploadedby=unknown.
+      - name: openid-connect
+        tags: [ s3-presign, do-not-touch-adam-poc ]
+        config: {}
+
+      # -- 2. Sideband authorization -----------------------------------------
+      # TODO: paste your working ping-auth config.
+      # Route tags op:upload / op:list / op:download give policy a clean
+      # verb + resource split.
+      - name: ping-auth
+        tags: [ s3-presign, do-not-touch-adam-poc ]
+        config: {}
+
+      # -- 3. Request transformer --------------------------------------------
+      # remove runs before add, so a client cannot pre-set an identity header
+      # and have its value survive. These three feed object metadata.
+      #
+      # X-Real-Ip and X-Client-Cert-Thumbprint are deliberately NOT removed -
+      # the F5 sets both. For Kong to honour the inbound X-Real-Ip rather than
+      # overwrite it with the F5's own address, kong.conf needs:
+      #     trusted_ips = <F5 addresses>
+      #     real_ip_header = X-Real-Ip
+      #     real_ip_recursive = on
+      - name: request-transformer
+        tags: [ s3-presign, do-not-touch-adam-poc ]
         config:
-          s3_endpoint: https://s3.myprototype.io
+          remove:
+            headers:
+              - Authorization
+              - X-Authenticated-Client-Id
+
+      # -- 4. The plugin itself ----------------------------------------------
+      - name: s3-presign
+        tags: [ s3-presign, do-not-touch-adam-poc ]
+        config:
+          s3_endpoint: https://s3.myprototype.io     # https only, enforced
           bucket: example-bucket
           region: ap-southeast-2
           base_path: /files
           base_prefix: "files/"
+
           access_key: "{vault://env/s3-access-key}"
           secret_key: "{vault://env/s3-secret-key}"
+
+          client_id_header: X-Authenticated-Client-Id
+          client_ip_header: X-Real-Ip
+          cert_thumbprint_header: X-Client-Cert-Thumbprint
+
           upload_mode: post
           upload_ttl: 300
           download_ttl: 900
           max_bytes: 5000000
+          max_keys: 1000
           ssl_verify: true
+
+      # -- 5. Response transformer -------------------------------------------
+      # The plugin already sets Cache-Control on its own responses; these are
+      # belt and braces. Verify they land - response-phase plugins may not run
+      # on a response short-circuited in the access phase.
+      - name: response-transformer
+        tags: [ s3-presign, do-not-touch-adam-poc ]
+        config:
+          add:
+            headers:
+              - "X-Content-Type-Options:nosniff"
+              - "Referrer-Policy:no-referrer"
+          remove:
+            headers: [ Server, X-Powered-By ]
+
+      # -- 6. HTTP log to Splunk HEC ------------------------------------------
+      # TODO: paste your working config from dispatch-splunk.yaml.
+      - name: http-log
+        tags: [ s3-presign, do-not-touch-adam-poc ]
+        config: {}

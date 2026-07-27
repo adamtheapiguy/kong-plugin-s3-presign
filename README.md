@@ -4,160 +4,131 @@ Mints presigned S3 URLs and lists bucket contents natively in Kong. Developed
 against a Pure Storage FlashBlade object store; should work with any
 S3-compatible endpoint that supports SigV4.
 
-    POST <base_path>          -> presigned upload (POST policy, or PUT)
-    GET  <base_path>          -> list objects under the base prefix, as JSON
-    GET  <base_path>/<path>   -> presigned download URL
+    POST <base_path>          -> presigned upload form (POST policy)
+    GET  <base_path>          -> ListObjectsV2 response as JSON
+    GET  <base_path>/<key>    -> 307 to a presigned download URL
 
 The plugin terminates in the access phase; no upstream is contacted.
 
-## Layout
+## Responses
 
-    kong/plugins/s3-presign/handler.lua   operation routing and responses
-    kong/plugins/s3-presign/schema.lua    config schema
-    kong/plugins/s3-presign/sigv4.lua     SigV4 presign / POST policy / signing
-    kong-plugin-s3-presign-0.1.0-1.rockspec
-    files-service.example.yaml            decK config, sanitised
+**Upload** — `POST /files` with `{"filename":"a.txt","contentType":"text/plain"}`
+
+```json
+{
+  "key": "files/a.txt",
+  "expiresIn": 300,
+  "maxBytes": 5000000,
+  "upload": { "url": "https://…/bucket", "fields": { "…": "…" } }
+}
+```
+
+Post the fields plus `file` as multipart. Use `--form-string` for the fields
+and `-F` only for the file: curl reads `=@` and `=<` in `-F` as file
+references, which breaks on the policy blob.
+
+**List** — `GET /files`, mirroring ListObjectsV2:
+
+```json
+{
+  "Name": "example-bucket",
+  "Prefix": "files/",
+  "MaxKeys": 1000,
+  "KeyCount": 1,
+  "IsTruncated": false,
+  "Contents": [
+    { "Key": "files/a.txt", "LastModified": "…", "ETag": "…",
+      "Size": 58, "StorageClass": "STANDARD" }
+  ]
+}
+```
+
+Flat listing — no delimiter is sent, so there are no `CommonPrefixes`.
+`?prefix=`, `?max-keys=` and `?continuation-token=` are accepted;
+`NextContinuationToken` comes back when `IsTruncated` is true.
+
+**Download** — `GET /files/a.txt` returns **307** with `Location` set to the
+presigned URL and this body:
+
+```json
+{
+  "key": "files/a.txt",
+  "download": { "url": "https://…", "expiresIn": 900 }
+}
+```
+
+`curl -L` fetches the object in one round trip; omit `-L` to read the URL.
 
 ## Config
 
 | Field | Default | Notes |
 |---|---|---|
-| `s3_endpoint` | - | scheme + host, no path |
+| `s3_endpoint` | - | must be `https://` |
 | `bucket` | - | |
-| `region` | `ap-southeast-2` | any value works, must match what the array expects |
+| `region` | `ap-southeast-2` | must match what the store expects |
 | `base_path` | `/files` | must match the route prefix |
 | `base_prefix` | `files/` | folder inside the bucket |
 | `access_key` / `secret_key` | - | vault-referenceable |
+| `client_id_header` | `X-Authenticated-Client-Id` | → `x-amz-meta-uploadedby` |
+| `client_ip_header` | `X-Real-Ip` | → `x-amz-meta-clientipattimeofupload` |
+| `cert_thumbprint_header` | `X-Client-Cert-Thumbprint` | → `x-amz-meta-client-cert-thumbprint` |
 | `upload_mode` | `post` | `post` = POST policy with size cap; `put` = presigned PUT |
 | `upload_ttl` | `300` | seconds |
 | `download_ttl` | `900` | seconds |
 | `max_bytes` | `5000000` | only enforced in `post` mode |
-| `ssl_verify` | `true` | for the plugin's own call to the array |
+| `max_keys` | `1000` | per listing page |
+| `ssl_verify` | `true` | for the plugin's own call to the store |
 
-`base_path` and `base_prefix` are separate so the API surface and the object
-layout can diverge later without a code change.
+The three header settings must name headers **Kong** sets, not ones a client
+can supply — strip inbound copies with `request-transformer`, or the
+provenance metadata is attacker-controlled.
 
-## Publish to GitHub
+## Install
 
-Replace `adamtheapiguy` in the rockspec, then from this directory:
+    luarocks install kong-plugin-s3-presign
 
-    git init -b main
-    git add .
-    git commit -m "Kong plugin: presigned S3 URLs and bucket listing"
+Then on each node — every data plane needs the handler, and the control plane
+needs it too since it validates plugin config against the schema:
 
-    gh repo create kong-plugin-s3-presign --private --source=. \
-      --remote=origin --push
-
-    git tag v0.1.0 && git push origin v0.1.0
-
-Build a self-contained rock and commit it, so target hosts need no toolchain:
-
-    luarocks make --pack-binary-rock kong-plugin-s3-presign-0.1.0-1.rockspec
-    mkdir -p rocks && mv kong-plugin-s3-presign-0.1.0-1.all.rock rocks/
-    git add -f rocks/ && git commit -m "rock 0.1.0" && git push
-
-`files-service.yaml` is gitignored - keep site-specific endpoints out of the
-repo and publish only the `.example.yaml`.
-
-Check for a name collision before you publish - `s3-presign` is an obvious
-enough name that someone may already have it on LuaRocks.
-
-## Install from GitHub
-
-Prebuilt rock, no git needed on the host:
-
-    luarocks install https://github.com/adamtheapiguy/kong-plugin-s3-presign/raw/main/rocks/kong-plugin-s3-presign-0.1.0-1.all.rock
-
-Or from the rockspec, which clones the tagged source:
-
-    luarocks install https://raw.githubusercontent.com/adamtheapiguy/kong-plugin-s3-presign/main/kong-plugin-s3-presign-0.1.0-1.rockspec
-
-Neither works against a private repo - raw URLs need a token. Use the offline
-path below if the repo stays private, or if the hosts cannot reach github.com.
-
-## Install offline
-
-Copy the zip or a clone to each node. Every data plane needs the handler; the
-control plane needs it too, because it validates plugin config against the
-schema and will reject the entity otherwise. In hybrid mode that means both.
-
-    cd kong-plugin-s3-presign
-    luarocks make kong-plugin-s3-presign-0.1.0-1.rockspec
-
-Add to `kong.conf` on each node:
-
+    # /etc/kong/kong.conf
     plugins = bundled,s3-presign
 
-While you are in there, these are needed for the client IP that gets stamped
-into object metadata (the load balancer sets X-Real-IP; without
-this Kong replaces it with the balancer's own address):
-
+    # so the client IP stamped into metadata is the client's, not the
+    # load balancer's
     trusted_ips = <load balancer addresses>
-    real_ip_header = X-Real-IP
+    real_ip_header = X-Real-Ip
     real_ip_recursive = on
 
-Restart, then confirm the plugin loaded:
-
-    kong restart
+    kong check /etc/kong/kong.conf && kong restart
     curl -s localhost:8001 | jq '.plugins.available_on_server."s3-presign"'
 
 ## Configure
 
-Export the secrets the vault references resolve against:
+Copy `files-service.example.yaml` to `files-service.yaml`, fill in your
+endpoints, then:
 
-    export S3_ACCESS_KEY=... S3_SECRET_KEY=...
-    # plus whatever your auth and logging plugins reference
+    deck gateway diff  files-service.yaml --select-tag do-not-touch-adam-poc
+    deck gateway apply files-service.yaml
 
-Then:
-
-    export DECK_KONG_ADDR=https://kong-control-plane:8001
-    deck gateway diff files-service.yaml --select-tag s3-presign
-    deck gateway sync files-service.yaml --select-tag s3-presign
-
-Copy `files-service.example.yaml` to `files-service.yaml` and fill in your own
-endpoints. The unsuffixed name is gitignored so site-specific config stays out
-of the repo.
-
-Always pass `--select-tag`. A bare sync reconciles the whole config against
-this one file and would delete the existing PoC entities.
-
-## Test
-
-    TOKEN=<access token from your OIDC IdP>
-    GW=https://api.myprototype.io
-
-    # list
-    curl -k --http1.1 -H "Authorization: Bearer $TOKEN" $GW/files
-
-    # upload - returns url + fields
-    curl -k --http1.1 -X POST -H "Authorization: Bearer $TOKEN" \
-      -H 'Content-Type: application/json' \
-      -d '{"filename":"file.txt","contentType":"text/plain"}' \
-      $GW/files
-
-    # download
-    curl -k --http1.1 -H "Authorization: Bearer $TOKEN" $GW/files/file.txt
-
-If you front this with a sideband authorization plugin, check whether it
-supports HTTP/2 - some are HTTP/1.1 only and need `--http1.1`.
-
-Feed the upload response into curl with `--form-string` for every field and
-`-F` only for the file. curl treats `=<` and `=@` in `-F` as file references,
-which will bite on any value that starts with one.
+`apply` rather than `sync` — sync reconciles the whole config against one
+file and will delete anything not in it.
 
 ## Known limits
 
-- Listing stops at 1000 keys; the response carries `truncated: true` and the
-  continuation token is not followed.
-- `upload_mode: post` depends on POST-to-bucket form uploads, which are not
-  supported by every S3-compatible implementation. If they return NotImplemented, switch to
-  `upload_mode: put` and add request-size-limiting to the upload route.
+- One listing page per request. `NextContinuationToken` is returned but the
+  plugin does not follow it — clients paginate.
 - Object tagging is NotImplemented on FlashBlade, so provenance is carried as
-  `x-amz-meta-*`. Metadata cannot be referenced in bucket policy conditions.
-- Whether `response-transformer` applies to a `kong.response.exit` response is
-  worth verifying - check that `Cache-Control: no-store` actually lands.
+  `x-amz-meta-*`. Metadata cannot be referenced in bucket policy conditions
+  and is fixed at write time.
+- `upload_mode: post` relies on POST-to-bucket form uploads. Confirmed
+  working on FlashBlade including `content-length-range`, but not universal
+  across S3-compatible stores — switch to `put` if yours returns
+  `NotImplemented`, and add request-size-limiting for the size cap.
+- Response-phase plugins may not run on a response short-circuited in the
+  access phase. The plugin sets `Cache-Control: no-store` itself for that
+  reason; verify anything you add via response-transformer actually lands.
 - `encrypted = true` on the key fields needs the Kong EE keyring configured.
   Drop the flag from schema.lua if it is not, and rely on the vault reference.
-- The SigV4 implementation here is hand-rolled and has no test suite. Keys
-  with spaces or non-ASCII characters, and data-plane clock drift, are the
-  likely first failure modes.
+- The SigV4 implementation is hand-rolled and has no test suite. Keys with
+  spaces or non-ASCII characters, and data-plane clock drift, are the likely
+  first failure modes.
