@@ -6,8 +6,9 @@ local cjson = require "cjson.safe"
 local sigv4 = require "kong.plugins.s3-presign.sigv4"
 
 local S3Presign = {
-  -- Below openid-connect (1050), ping-auth and request-transformer (801) so
-  -- authentication, authorization and header scrubbing all run first.
+  -- Below openid-connect (1050), any sideband authorization plugin, and
+  -- request-transformer (801), so authentication, authorization and header
+  -- scrubbing all run first.
   PRIORITY = 750,
   VERSION  = "0.1.0",
 }

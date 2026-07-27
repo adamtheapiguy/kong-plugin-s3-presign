@@ -123,8 +123,8 @@ this one file and would delete the existing PoC entities.
 
 ## Test
 
-    TOKEN=<access token from PingAM>
-    GW=https://gateway.example.internal
+    TOKEN=<access token from your OIDC IdP>
+    GW=https://api.myprototype.io
 
     # list
     curl -k --http1.1 -H "Authorization: Bearer $TOKEN" $GW/files

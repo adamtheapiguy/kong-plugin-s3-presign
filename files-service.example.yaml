@@ -34,9 +34,14 @@ services:
         tags: [ s3-presign, "op:download" ]
 
     plugins:
+      # Front this with whatever authentication your gateway uses - e.g. the
+      # openid-connect plugin pointed at your OIDC IdP, plus a sideband
+      # authorization plugin. The identity headers those set upstream are what
+      # s3-presign stamps into object metadata:
+      #   X-Authenticated-Userid / -Email / -Company
       - name: s3-presign
         config:
-          s3_endpoint: https://s3.example.internal
+          s3_endpoint: https://s3.myprototype.io
           bucket: example-bucket
           region: us-east-1
           base_path: /files
